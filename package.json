@@ -1,0 +1,24 @@
+{
+  "name": "easytier-ws-relay",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0",
+    "start": "wrangler dev",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "protobufjs": "^8.0.0",
+    "uuid": "^13.0.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "protobufjs-cli": "^2.0.0"
+  }
+}

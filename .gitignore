@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+
+# Build outputs
+dist/
+build/
+target/
+
+# Cloudflare Workers
+.wrangler/
+.cloudflare/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage directory used by tools like istanbul
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Icon?
+*~
+.DS_Store
+
+# Protobuf generated files (if any temporary files are created)
+.proto.backup
+
+# Runtime data
+*.pid
+*.seed
+
+# Debug files
+debug/
+*.stackdump

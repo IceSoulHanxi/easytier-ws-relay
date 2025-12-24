@@ -1,0 +1,13 @@
+name = "easytier-ws-relay-worker"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "RELAY_ROOM", class_name = "RelayRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]
