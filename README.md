@@ -128,13 +128,19 @@ easytier-ws-relay/
 
 ## 客户端连接说明
 
-部署后，EasyTier 客户端连接地址需要添加路径 `/ws`，例如：
+部署后，EasyTier 客户端连接地址需要添加路径 `/ws`。
+
+默认情况下，WebSocket路径为`/ws`，该路径可以在`wrangler.toml`中通过`WS_PATH`变量进行自定义。
+
+easytier中端口号使用0为使用协议默认端口，ws对应80，wss对应443。
+
+开发模式:
 ```
-ws://your-deployment.workers.dev/ws
+ws://your-network-ip:0/ws
 ```
-或
+部署后:
 ```
-wss://your-deployment.workers.dev/ws
+wss://your-deployment.workers.dev:0/ws
 ```
 
 ## 贡献
