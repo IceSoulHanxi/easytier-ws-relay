@@ -126,6 +126,17 @@ easytier-ws-relay/
 - 客户端状态管理与心跳维持
 - RPC 请求/响应处理机制
 
+## 客户端连接说明
+
+部署后，EasyTier 客户端连接地址需要添加路径 `/ws`，例如：
+```
+ws://your-deployment.workers.dev/ws
+```
+或
+```
+wss://your-deployment.workers.dev/ws
+```
+
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request 来改进本项目。
