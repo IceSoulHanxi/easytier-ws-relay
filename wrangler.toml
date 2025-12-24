@@ -11,3 +11,6 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
+
+[env.development]
+vars = { WS_PATH = "/ws" }
