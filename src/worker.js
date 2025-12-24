@@ -14,7 +14,7 @@ export default {
     }
 
     // WebSocket path can be configured via WS_PATH environment variable, defaults to '/ws'
-    const wsPath = env.WS_PATH || '/ws';
+    const wsPath = '/' + env.WS_PATH || '/ws';
     if (pathname === wsPath || pathname === wsPath + '/') {
       if (request.headers.get('Upgrade') !== 'websocket') {
         return new Response('Expected WebSocket upgrade', { status: 400 });
