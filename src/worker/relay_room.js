@@ -21,7 +21,7 @@ export class RelayRoom {
 
   async fetch(request) {
     const url = new URL(request.url);
-    // WebSocket path validation (should already be validated in worker.js)
+    // WebSocket path can be configured via WS_PATH environment variable, defaults to '/ws'
     const wsPath = '/' + this.env.WS_PATH || '/ws';
     if (url.pathname !== wsPath) {
       return new Response('Not found', { status: 404 });
