@@ -1,8 +1,6 @@
 import { MY_PEER_ID, PacketType } from './constants.js';
 import { createHeader } from './packet.js';
-import { getPeerManager } from './peer_manager.js';
 import { wrapPacket, randomU64String, sha256 } from './crypto.js';
-import { gzipMaybe, gunzipMaybe, isCompressionAvailable } from './compress.js';
 import { loadProtos } from './protos.js';
 
 // Helper to convert transactionId to proper format for protobuf int64
@@ -49,15 +47,11 @@ function toLongForProto(value) {
   return value;
 }
 
-const peerCenterStateByGroup = new Map();
 const PEER_CENTER_TTL_MS = Number(process.env.EASYTIER_PEER_CENTER_TTL_MS || 180_000);
 const PEER_CENTER_CLEAN_INTERVAL = Math.max(30_000, Math.min(PEER_CENTER_TTL_MS / 2, 120_000));
-let lastPeerCenterClean = 0;
-function pm() {
-  return getPeerManager();
-}
 
-function getPeerCenterState(groupKey) {
+function getPeerCenterState(peerManager, groupKey) {
+  const peerCenterStateByGroup = peerManager.peerCenterStateByGroup;
   const k = String(groupKey || '');
   let s = peerCenterStateByGroup.get(k);
   if (!s) {
@@ -68,15 +62,16 @@ function getPeerCenterState(groupKey) {
     peerCenterStateByGroup.set(k, s);
   }
   const now = Date.now();
-  if (now - lastPeerCenterClean > PEER_CENTER_CLEAN_INTERVAL) {
-    cleanPeerCenterState(now);
+  if (now - peerManager.lastPeerCenterClean > PEER_CENTER_CLEAN_INTERVAL) {
+    cleanPeerCenterState(peerManager, now);
   }
   s.lastTouch = Date.now();
   return s;
 }
 
-function cleanPeerCenterState(now = Date.now()) {
-  lastPeerCenterClean = now;
+function cleanPeerCenterState(peerManager, now = Date.now()) {
+  peerManager.lastPeerCenterClean = now;
+  const peerCenterStateByGroup = peerManager.peerCenterStateByGroup;
   for (const [gk, s] of peerCenterStateByGroup.entries()) {
     for (const [pid, info] of s.globalPeerMap.entries()) {
       if (now - (info.lastSeen || 0) > PEER_CENTER_TTL_MS) {
@@ -111,10 +106,10 @@ function calcPeerCenterDigestFromMap(mapObj) {
   return u64.toString();
 }
 
-function buildPeerCenterResponseMap(groupKey, state) {
+function buildPeerCenterResponseMap(peerManager, groupKey, state) {
   const out = {};
-  const set = new Set(pm().listPeerIdsInGroup(groupKey));
-  const infos = pm()._getPeerInfosMap(groupKey, false);
+  const set = new Set(peerManager.listPeerIdsInGroup(groupKey));
+  const infos = peerManager._getPeerInfosMap(groupKey, false);
   if (infos) {
     for (const pid of infos.keys()) set.add(pid);
   }
@@ -133,20 +128,12 @@ function sendRpcResponse(ws, toPeerId, reqRpcPacket, types, responseBodyBytes) {
     console.error(`sendRpcResponse aborted: socket not open (readyState=${ws ? ws.readyState : 'nil'}) toPeer=${toPeerId}`);
     return;
   }
-  const compressEnabled = process.env.EASYTIER_COMPRESS_RPC !== '0';
-  let responseBody = responseBodyBytes;
-  let compressionInfo = { algo: 1, acceptedAlgo: 1 };
-  if (compressEnabled && responseBodyBytes && responseBodyBytes.length > 256 && isCompressionAvailable()) {
-    try {
-      responseBody = gzipMaybe(responseBodyBytes);
-      compressionInfo = { algo: 2, acceptedAlgo: 1 };
-    } catch (e) {
-      console.warn(`Compress rpc response failed: ${e.message}`);
-    }
-  }
+  // Algorithm 2 is Zstandard in EasyTier, not gzip. Until Zstandard is
+  // implemented here, advertise and send only the supported uncompressed form.
+  const compressionInfo = { algo: 1, acceptedAlgo: 1 };
 
   const rpcResponsePayload = {
-    response: responseBody,
+    response: responseBodyBytes,
     error: null,
     runtimeUs: 0,
   };
@@ -206,7 +193,7 @@ function sendRpcResponse(ws, toPeerId, reqRpcPacket, types, responseBodyBytes) {
   }
 }
 
-export function handleRpcReq(ws, header, payload, types) {
+export function handleRpcReq(ws, header, payload, types, peerManager) {
   try {
     const rpcPacket = types.RpcPacket.decode(payload);
 
@@ -241,14 +228,9 @@ export function handleRpcReq(ws, header, payload, types) {
     }
     console.log(`handleRpcReq: from=${header.fromPeerId} transactionId=${txIdValue} (${txIdType}) ${txIdDetails} raw=${JSON.stringify(txId)}`);
 
-    if (rpcPacket.compressionInfo && rpcPacket.compressionInfo.algo > 1 && isCompressionAvailable()) {
-      try {
-        rpcPacket.body = gunzipMaybe(rpcPacket.body);
-        rpcPacket.compressionInfo.algo = 1;
-      } catch (e) {
-        console.error(`RpcPacket decompress failed from ${header.fromPeerId}: ${e.message}`);
-        return;
-      }
+    if (rpcPacket.compressionInfo && rpcPacket.compressionInfo.algo > 1) {
+      console.error(`Unsupported RPC compression algorithm ${rpcPacket.compressionInfo.algo} from ${header.fromPeerId}`);
+      return;
     }
     const descriptor = rpcPacket.descriptor;
 
@@ -265,7 +247,7 @@ export function handleRpcReq(ws, header, payload, types) {
     if ((descriptor.serviceName === 'peer_rpc.PeerCenterRpc' || descriptor.serviceName === 'PeerCenterRpc')
       && (descriptor.protoName === 'peer_rpc' || !descriptor.protoName)) {
       const groupKey = ws && ws.groupKey ? String(ws.groupKey) : '';
-      const state = getPeerCenterState(groupKey);
+      const state = getPeerCenterState(peerManager, groupKey);
       if (descriptor.methodIndex === 0) {
         const req = types.ReportPeersRequest.decode(innerReqBody);
         const myPeerId = req.myPeerId;
@@ -279,7 +261,7 @@ export function handleRpcReq(ws, header, payload, types) {
         }
         state.globalPeerMap.set(String(myPeerId), { directPeers, lastSeen: Date.now() });
 
-        const snapshot = buildPeerCenterResponseMap(groupKey, state);
+        const snapshot = buildPeerCenterResponseMap(peerManager, groupKey, state);
         state.digest = calcPeerCenterDigestFromMap(snapshot);
 
         const respBytes = types.ReportPeersResponse.encode({}).finish();
@@ -296,7 +278,7 @@ export function handleRpcReq(ws, header, payload, types) {
           return;
         }
 
-        const snapshot = buildPeerCenterResponseMap(groupKey, state);
+        const snapshot = buildPeerCenterResponseMap(peerManager, groupKey, state);
         state.digest = calcPeerCenterDigestFromMap(snapshot);
         const respBytes = types.GetGlobalPeerMapResponse.encode({
           globalPeerMap: snapshot,
@@ -321,7 +303,7 @@ export function handleRpcReq(ws, header, payload, types) {
       const hasForeignNet = !!req.foreignNetworkInfos;
       console.log(`SyncRouteInfo details: SessionID=${req.mySessionId}, Initiator=${req.isInitiator}, PeerInfosCount=${peerInfosCount}, HasConnBitmap=${hasConnBitmap}, HasForeignNet=${hasForeignNet}`);
       if (descriptor.methodIndex === 0 || descriptor.methodIndex === 1) {
-        handleSyncRouteInfo(ws, fromPeerId, rpcPacket, req, types);
+        handleSyncRouteInfo(ws, fromPeerId, rpcPacket, req, types, peerManager);
         return;
       }
       console.log(`Unhandled OspfRouteRpc methodIndex=${descriptor.methodIndex}`);
@@ -335,7 +317,7 @@ export function handleRpcReq(ws, header, payload, types) {
   }
 }
 
-export function handleRpcResp(ws, header, payload, types) {
+export function handleRpcResp(ws, header, payload, types, peerManager) {
   try {
     console.log(`RpcResp <- from=${header.fromPeerId} to=${header.toPeerId} len=${payload.length} packetType=${header.packetType} forwardCounter=${header.forwardCounter}`);
     const rpcPacket = types.RpcPacket.decode(payload);
@@ -370,14 +352,9 @@ export function handleRpcResp(ws, header, payload, types) {
       txIdDetails = '';
     }
     console.log(`handleRpcResp: transactionId=${txIdValue} (${txIdType}) ${txIdDetails} raw=${JSON.stringify(txId)}`);
-    if (rpcPacket.compressionInfo && rpcPacket.compressionInfo.algo > 1 && isCompressionAvailable()) {
-      try {
-        rpcPacket.body = gunzipMaybe(rpcPacket.body);
-        rpcPacket.compressionInfo.algo = 1;
-      } catch (e) {
-        console.error(`RpcResp decompress failed from ${header.fromPeerId}: ${e.message}`);
-        return;
-      }
+    if (rpcPacket.compressionInfo && rpcPacket.compressionInfo.algo > 1) {
+      console.error(`Unsupported RPC compression algorithm ${rpcPacket.compressionInfo.algo} from ${header.fromPeerId}`);
+      return;
     }
 
     const descriptor = rpcPacket.descriptor || {};
@@ -398,7 +375,7 @@ export function handleRpcResp(ws, header, payload, types) {
         const resp = types.SyncRouteInfoResponse.decode(rpcRespBody);
         const sessionId = resp && resp.sessionId ? resp.sessionId : null;
         if (sessionId && ws && ws.groupKey !== undefined) {
-          pm().onRouteSessionAck(ws.groupKey, header.fromPeerId, sessionId, ws.weAreInitiator);
+          peerManager.onRouteSessionAck(ws.groupKey, header.fromPeerId, sessionId, ws.weAreInitiator);
           console.log(`RpcResp SyncRouteInfoResponse from=${header.fromPeerId} sessionId=${sessionId} acked`);
         }
       } catch (e) {
@@ -420,7 +397,7 @@ export function handleRpcResp(ws, header, payload, types) {
   }
 }
 
-function handleSyncRouteInfo(ws, fromPeerId, reqRpcPacket, syncReq, types) {
+function handleSyncRouteInfo(ws, fromPeerId, reqRpcPacket, syncReq, types, peerManager) {
   const groupKey = ws && ws.groupKey ? String(ws.groupKey) : '';
 
   if (!ws.serverSessionId) {
@@ -430,19 +407,13 @@ function handleSyncRouteInfo(ws, fromPeerId, reqRpcPacket, syncReq, types) {
   if (syncReq && typeof syncReq.isInitiator === 'boolean') {
     ws.weAreInitiator = !syncReq.isInitiator;
   }
-  pm().onRouteSessionAck(groupKey, fromPeerId, syncReq.mySessionId, ws.weAreInitiator);
+  peerManager.onRouteSessionAck(groupKey, fromPeerId, syncReq.mySessionId, ws.weAreInitiator);
 
-  let hasNewPeers = false;
+  let hasChangedPeers = false;
   if (syncReq.peerInfos && syncReq.peerInfos.items) {
     syncReq.peerInfos.items.forEach(info => {
-      if (info.peerId !== MY_PEER_ID) {
-        const infos = pm()._getPeerInfosMap(groupKey, false);
-        const isNew = !infos || !infos.has(info.peerId);
-        pm().updatePeerInfo(groupKey, info.peerId, info);
-        if (isNew) hasNewPeers = true;
-      }
-      if (info.peerId === MY_PEER_ID) {
-        pm().updatePeerInfo(groupKey, info.peerId, info);
+      if (info.peerId === fromPeerId) {
+        if (peerManager.updatePeerInfo(groupKey, info.peerId, info)) hasChangedPeers = true;
       }
     });
   }
@@ -468,15 +439,15 @@ function handleSyncRouteInfo(ws, fromPeerId, reqRpcPacket, syncReq, types) {
 
   // After responding, push our current route info back to the requester (mirrors node behavior).
   try {
-    pm().pushRouteUpdateTo(fromPeerId, ws, types, { forceFull: true });
+    peerManager.pushRouteUpdateTo(fromPeerId, ws, types, { forceFull: true });
     console.log(`Successfully pushed route update to peer ${fromPeerId}`);
   } catch (e) {
     console.error(`Failed to push route update to peer ${fromPeerId}:`, e);
   }
 
-  if (hasNewPeers) {
+  if (hasChangedPeers) {
     try {
-      pm().broadcastRouteUpdate(types, groupKey, fromPeerId, { forceFull: true });
+      peerManager.broadcastRouteUpdate(types, groupKey, fromPeerId, { forceFull: true });
       console.log(`Successfully broadcast route update for group ${groupKey}`);
     } catch (e) {
       console.error(`Failed to broadcast route update for group ${groupKey}:`, e);

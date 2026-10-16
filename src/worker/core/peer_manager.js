@@ -72,7 +72,12 @@ export class PeerManager {
     this.peerInfosByGroup = new Map(); // groupKey -> Map(peerId -> peerInfo)
     this.routeSessions = new Map(); // groupKey -> peerId -> session state
     this.peerConnVersions = new Map(); // groupKey -> peerId -> version
+    this.networkDigestRegistry = new Map(); // networkName -> secret digest
+    this.peerCenterStateByGroup = new Map(); // groupKey -> peer-center state
+    this.lastPeerCenterClean = 0;
     this.types = null;
+    this.revision = Math.floor(Date.now() / 1000);
+    this.foreignNetworkVersions = new Map();
 
     this.allowVirtualIP = false;
     this.ipConfiguredByEnv = !!process.env.EASYTIER_IPV4_ADDR;
@@ -87,6 +92,28 @@ export class PeerManager {
 
   setTypes(types) {
     this.types = types;
+  }
+
+  exportState() {
+    return {
+      myInfo: this.ensureMyInfo(),
+      revision: this.revision,
+      peerConnVersions: Array.from(this.peerConnVersions, ([group, versions]) => [group, Array.from(versions)]),
+      foreignNetworkVersions: Array.from(this.foreignNetworkVersions),
+    };
+  }
+
+  restoreState(saved) {
+    if (!saved) return;
+    this.myInfo = saved.myInfo || null;
+    this.revision = Math.max(this.revision, saved.revision || 0);
+    this.peerConnVersions = new Map((saved.peerConnVersions || []).map(([group, versions]) => [group, new Map(versions)]));
+    this.foreignNetworkVersions = new Map(saved.foreignNetworkVersions || []);
+  }
+
+  nextRevision() {
+    this.revision = Math.max(this.revision + 1, Math.floor(Date.now() / 1000));
+    return this.revision;
   }
 
   ensureMyInfo() {
@@ -146,7 +173,7 @@ export class PeerManager {
   bumpPeerConnVersion(groupKey, peerId) {
     const m = this._getPeerConnVersionMap(groupKey, true);
     const current = m.get(peerId) || 0;
-    const next = current + 1;
+    const next = Math.max(this.nextRevision(), current + 1);
     m.set(peerId, next);
     return next;
   }
@@ -158,16 +185,11 @@ export class PeerManager {
 
   bumpAllPeerConnVersions(groupKey) {
     const allPeers = new Set(this.listPeerIdsInGroup(groupKey));
-    const infos = this._getPeerInfosMap(groupKey, false);
-    if (infos) {
-      for (const pid of infos.keys()) {
-        allPeers.add(pid);
-      }
-    }
     allPeers.add(MY_PEER_ID);
     for (const pid of allPeers) {
       this.bumpPeerConnVersion(groupKey, pid);
     }
+    this.foreignNetworkVersions.set(groupKey, this.nextRevision());
   }
 
   setPublicServerFlag(isPublicServer) {
@@ -267,7 +289,6 @@ export class PeerManager {
     if (s.dstSessionId !== theirSessionId) {
       s.peerInfoVerMap.clear();
       s.connBitmapVerMap.clear();
-      s.foreignNetVer = 0;
       s.lastConnBitmapSig = null;
     }
     s.dstSessionId = theirSessionId;
@@ -291,7 +312,8 @@ export class PeerManager {
     const groupKey = ws && ws.groupKey ? String(ws.groupKey) : '';
     if (!peerId) return false;
     const peers = this._getPeersMap(groupKey, false);
-    const wasPresent = peers && peers.has(peerId);
+    const wasPresent = peers && peers.get(peerId) === ws;
+    if (!wasPresent) return false;
     if (peers) peers.delete(peerId);
     const infos = this._getPeerInfosMap(groupKey, false);
     if (infos) infos.delete(peerId);
@@ -312,7 +334,7 @@ export class PeerManager {
       this.peerInfosByGroup.delete(groupKey);
       this.peerConnVersions.delete(groupKey);
     }
-    return true;
+    return !!wasPresent;
   }
 
   getPeerWs(peerId, groupKey) {
@@ -333,6 +355,10 @@ export class PeerManager {
   updatePeerInfo(groupKey, peerId, info) {
     const infos = this._getPeerInfosMap(groupKey, true);
     const isNew = !infos.has(peerId);
+    const previous = infos.get(peerId);
+    if (previous && (previous.version || 0) > (info.version || 0)) return false;
+    const changed = !previous || !Buffer.from(this.types.RoutePeerInfo.encode(previous).finish())
+      .equals(Buffer.from(this.types.RoutePeerInfo.encode(info).finish()));
     infos.set(peerId, info);
     if (isNew) {
       this.bumpAllPeerConnVersions(groupKey);
@@ -368,6 +394,7 @@ export class PeerManager {
         }
       }
     }
+    return changed;
   }
 
   broadcastRouteUpdate(types, groupKey, excludePeerId, opts = {}) {
@@ -405,12 +432,6 @@ export class PeerManager {
     const forceFullLocal = forceFull || !session.dstSessionId;
 
     const allPeers = new Set(this.listPeerIdsInGroup(groupKey));
-    const infos = this._getPeerInfosMap(groupKey, false);
-    if (infos) {
-      for (const pid of infos.keys()) {
-        allPeers.add(pid);
-      }
-    }
     allPeers.add(targetPeerId);
     const relevantPeers = [MY_PEER_ID, ...Array.from(allPeers).filter(p => p !== MY_PEER_ID).sort((a, b) => Number(a) - Number(b))];
     const defaultNetLen = myInfo.networkLength || 24;
@@ -471,7 +492,7 @@ export class PeerManager {
       const sig = `${peerIdVersions.map(p => `${p.peerId}:${p.version}`).join(',')}|${bitmapBuf.toString('hex')}`;
       const connVersion = session.connBitmapVerMap.get(targetPeerId) || 0;
       const nextConnVersion = connVersion || Math.max(...peerIdVersions.map(p => p.version));
-      if (sig !== session.lastConnBitmapSig) {
+      if (forceFullLocal || sig !== session.lastConnBitmapSig) {
         session.connBitmapVerMap.set(targetPeerId, nextConnVersion);
         session.lastConnBitmapSig = sig;
         connBitmap = { peerIds: peerIdVersions, bitmap: bitmapBuf, version: nextConnVersion };
@@ -481,19 +502,18 @@ export class PeerManager {
     const foreignNetworkInfos = (() => {
       const mode = (process.env.EASYTIER_HANDSHAKE_MODE || 'foreign').toLowerCase();
       if (mode === 'same' || mode === 'same_network') return null;
-      const version = session.foreignNetVer + 1;
-      session.foreignNetVer = version;
+      const version = this.foreignNetworkVersions.get(groupKey) || this.nextRevision();
       return {
         infos: [{
           key: {
             peerId: MY_PEER_ID,
-            networkName: process.env.EASYTIER_PUBLIC_SERVER_NETWORK_NAME || 'dev-websocket-relay'
+            networkName: ws.domainName || ''
           },
           value: {
             foreignPeerIds: Array.from(allPeers),
             lastUpdate: { seconds: Math.floor(Date.now() / 1000), nanos: 0 },
             version,
-            networkSecretDigest: Buffer.alloc(32),
+            networkSecretDigest: Buffer.from(this.networkDigestRegistry.get(ws.domainName || '') || '', 'hex'),
             myPeerIdForThisNetwork: MY_PEER_ID
           }
         }]
@@ -547,12 +567,4 @@ export class PeerManager {
       // ignore
     }
   }
-}
-
-let peerManagerInstance = null;
-export function getPeerManager() {
-  if (!peerManagerInstance) {
-    peerManagerInstance = new PeerManager();
-  }
-  return peerManagerInstance;
 }

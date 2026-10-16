@@ -7,7 +7,10 @@
   "scripts": {
     "dev": "wrangler dev --ip 0.0.0.0",
     "start": "wrangler dev",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:vps": "node src/server.js",
+    "test:vps": "node --test tests/vps-server.mjs",
+    "test": "node tests/route-updates.mjs && node tests/restart-recovery.mjs && npm run test:vps",
+    "check:worker": "wrangler deploy --dry-run --outdir .wrangler/route-regression"
   },
   "keywords": [],
   "author": "",

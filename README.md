@@ -1,4 +1,4 @@
-# EasyTier WebSocket Relay for Cloudflare Workers
+# EasyTier WebSocket Relay（Cloudflare Workers / VPS）
 
 ## 项目简介
 
@@ -20,7 +20,7 @@
 
 ### 前置要求
 
-- Node.js (>= 16.0.0)
+- Node.js 22 或更新版本（VPS Docker 部署无需在宿主机安装 Node.js）
 - pnpm (推荐) 或 npm
 - Wrangler CLI (Cloudflare Workers 工具链)
 
@@ -77,6 +77,79 @@ wrangler dev
 wrangler deploy
 ```
 
+## 部署到 VPS 云主机
+
+VPS 版本使用 Node.js 和 `ws`，复用现有 EasyTier 协议处理器，不需要 Cloudflare 账号。支持安装了 Docker Engine 和 Docker Compose v2 的 Linux VPS（例如 Ubuntu / Debian，amd64 或 arm64）。请先按 [Docker 官方安装说明](https://docs.docker.com/engine/install/)安装 Docker，并确保 `docker compose version` 可用。Compose 需要支持 `up --wait`，其行为见 [官方说明](https://docs.docker.com/reference/cli/docker/compose/up/)。
+
+### 通过 IP 部署 WS
+
+在 VPS 上执行（需要 Git；Docker 权限不足时给部署命令加 `sudo`）：
+
+```bash
+git clone https://github.com/yuliyang2023/easytier-ws-relay.git
+cd easytier-ws-relay
+bash scripts/deploy-vps.sh up
+curl --fail http://127.0.0.1:8787/healthz
+```
+
+首次执行会从示例创建 `deploy/vps.env`。脚本构建镜像、启动服务，并等待中继健康检查通过；容器配置为自动重启，Docker 服务也应设置为开机启动。
+
+在云主机安全组和系统防火墙中放行 **TCP 8787**，EasyTier 客户端填写：
+
+```text
+ws://你的VPS公网IP:8787/ws
+```
+
+通过修改 `deploy/vps.env` 中的 `RELAY_PORT` 可更换公网端口；`WS_PATH` 不带开头的 `/`。修改后再次运行 `up` 应用配置。`EASYTIER_DISABLE_RELAY=1` 可启用纯 P2P 模式。
+
+### 通过域名部署 WSS
+
+将域名的 A / AAAA 记录指向 VPS（仅配置实际可达的 IPv6），放行 **TCP 80、443**，并确保这两个端口没有被其他服务占用。先准备配置：
+
+```bash
+cp deploy/vps.env.example deploy/vps.env  # 仅首次创建；已有配置时直接编辑
+chmod 600 deploy/vps.env
+nano deploy/vps.env
+```
+
+设置 `RELAY_DOMAIN=relay.example.com` 和 `BIND_ADDRESS=127.0.0.1`，然后执行：
+
+```bash
+bash scripts/deploy-vps.sh up --tls
+curl --fail https://relay.example.com/healthz
+```
+
+Caddy 会根据域名自动申请、续期证书并代理 WebSocket，要求 DNS 和 80/443 端口可达，详见 [Caddy 官方说明](https://caddyserver.com/docs/quick-starts/reverse-proxy)。部署脚本等待中继服务健康；证书是否成功签发以 HTTPS 检查和 Caddy 日志为准。客户端显式填写端口：
+
+```text
+wss://relay.example.com:443/ws
+```
+
+### 更新与运维
+
+```bash
+git pull --ff-only
+bash scripts/deploy-vps.sh up       # 重新构建并部署更新
+bash scripts/deploy-vps.sh status   # 查看容器状态
+bash scripts/deploy-vps.sh logs     # 查看实时日志，Ctrl+C 退出
+bash scripts/deploy-vps.sh restart  # 重启
+bash scripts/deploy-vps.sh down     # 停止，不删除证书卷
+```
+
+**WSS 部署的每条运维命令都需要追加 `--tls`**，例如 `bash scripts/deploy-vps.sh logs --tls`。切回 WS 时运行不带 `--tls` 的 `up`，会移除 Caddy 容器，保留证书卷；同时按需修改绑定地址和放行 WS 端口。
+
+VPS 服务在单个进程中维护房间和路由状态；重启后由客户端重新连接并重建路由，不保留 Durable Object 的休眠状态。不要对同一入口运行多个独立副本，否则各副本之间无法互相转发。可使用 `/ws?room=房间名` 隔离连接，默认房间为 `default`。健康检查路径为 `/healthz`。
+
+本地直接验证 VPS 服务：
+
+```bash
+npm ci
+npm run start:vps
+npm test
+```
+
+`npm test` 覆盖路由回归和 VPS WebSocket 集成测试；已安装 Wrangler 时，可额外运行 `npm run check:worker` 验证 Cloudflare 构建。
+
 ### 配置说明
 
 项目使用 [wrangler.toml](file:///Users/runner/work/easytier/easytier/easytier-v3/easytier-ws-relay/wrangler.toml#L0-L0) 文件进行配置，主要配置项包括：
@@ -130,7 +203,7 @@ easytier-ws-relay/
 
 在 `wrangler.toml` 的 `[vars]` 中配置：
 - `EASYTIER_DISABLE_RELAY`: `"1"` 开启纯 P2P，默认 `"0"`
-- `EASYTIER_COMPRESS_RPC`: `"0"` 关闭 RPC 压缩（调试用），默认 `"1"`
+- RPC 当前使用未压缩格式，并向客户端通告仅支持该格式。EasyTier 的压缩算法 2 是 Zstandard；本实现尚未支持，因此 `EASYTIER_COMPRESS_RPC` 暂不启用压缩。
 
 修改完配置后按正常方式运行 `wrangler dev` 或部署即可生效。
 
@@ -162,15 +235,17 @@ Durable Object 默认会根据请求来源自动选择最近的地区部署。�
 
 默认情况下，WebSocket路径为`/ws`，该路径可以在`wrangler.toml`中通过`WS_PATH`变量进行自定义。
 
-easytier中端口号使用0为使用协议默认端口，ws对应80，wss对应443。
+Cloudflare Workers 部署地址建议显式使用 `8443`。EasyTier 的部分版本会把
+`wss://...:0` 原样放入 HTTP `Host` 请求头而被 Cloudflare 拒绝；省略端口时又可能
+回退到 EasyTier 自身的 WSS 默认端口 `11012`。
 
 开发模式:
 ```
-ws://your-network-ip:0/ws
+ws://your-network-ip:8787/ws
 ```
 部署后:
 ```
-wss://your-deployment.workers.dev:0/ws
+wss://your-deployment.workers.dev:8443/ws
 ```
 
 ## 贡献

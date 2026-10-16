@@ -1,0 +1,24 @@
+name: easytier-ws-relay
+services:
+  relay:
+    build:
+      context: ..
+    restart: unless-stopped
+    init: true
+    environment:
+      WS_PATH: ${WS_PATH:-ws}
+      EASYTIER_PUBLIC_SERVER_NETWORK_NAME: ${EASYTIER_PUBLIC_SERVER_NETWORK_NAME:-public_server}
+      EASYTIER_DISABLE_RELAY: ${EASYTIER_DISABLE_RELAY:-0}
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${RELAY_PORT:-8787}:8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

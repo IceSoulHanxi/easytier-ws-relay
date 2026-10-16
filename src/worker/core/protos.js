@@ -1,6 +1,6 @@
 // 必须放在最前面！
 import Long from 'long';
-import * as protobuf from 'protobufjs/minimal';
+import protobuf from 'protobufjs/minimal.js';
 
 // 关键一步：告诉 protobufjs 使用 long.js
 protobuf.util.Long = Long;

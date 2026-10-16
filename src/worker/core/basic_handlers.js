@@ -1,36 +1,34 @@
 import { MAGIC, VERSION, MY_PEER_ID, PacketType } from './constants.js';
 import { createHeader } from './packet.js';
-import { getPeerManager } from './peer_manager.js';
 import { wrapPacket, randomU64String } from './crypto.js';
 
 const WS_OPEN = (typeof WebSocket !== 'undefined' && WebSocket.OPEN) ? WebSocket.OPEN : 1;
 
-// Record the first registered digest per network name; later mismatched digest will be rejected
-const networkDigestRegistry = new Map();
-
-export function handleHandshake(ws, header, payload, types) {
+export function handleHandshake(ws, header, payload, types, peerManager) {
   try {
     const req = types.HandshakeRequest.decode(payload);
-    try {
-      const dig = req.networkSecretDigrest ? Buffer.from(req.networkSecretDigrest) : Buffer.alloc(0);
-      console.log(`Handshake networkSecretDigest(hex)=${dig.toString('hex')}`);
-    } catch (_) {
-      // ignore
-    }
 
     if (req.magic !== MAGIC) {
-      console.error('Invalid magic');
-      ws.close();
+      console.warn({ event: 'websocket_server_close', code: 1008, reason: 'invalid magic', peerId: req.myPeerId, serverSessionId: ws.serverSessionId });
+      ws.close(1008, 'invalid magic');
       return;
     }
 
     const clientNetworkName = req.networkName || '';
     const clientDigest = req.networkSecretDigrest ? Buffer.from(req.networkSecretDigrest) : Buffer.alloc(0);
     const digestHex = clientDigest.toString('hex');
+    const networkDigestRegistry = peerManager.networkDigestRegistry;
     const existingDigest = networkDigestRegistry.get(clientNetworkName);
     if (existingDigest && existingDigest !== digestHex) {
-      console.error(`Rejecting handshake from ${req.myPeerId}: digest mismatch for network "${clientNetworkName}" (existing=${existingDigest}, incoming=${digestHex})`);
-      ws.close();
+      console.warn({
+        event: 'websocket_server_close',
+        code: 1008,
+        reason: 'network secret mismatch',
+        peerId: req.myPeerId,
+        serverSessionId: ws.serverSessionId,
+        networkName: clientNetworkName,
+      });
+      ws.close(1008, 'network secret mismatch');
       return;
     }
     if (!existingDigest) {
@@ -54,7 +52,7 @@ export function handleHandshake(ws, header, payload, types) {
 
     ws.groupKey = groupKey;
     ws.peerId = req.myPeerId;
-    const pm = getPeerManager();
+    const pm = peerManager;
     pm.addPeer(req.myPeerId, ws);
     pm.updatePeerInfo(ws.groupKey, req.myPeerId, {
       peerId: req.myPeerId,
@@ -65,6 +63,12 @@ export function handleHandshake(ws, header, payload, types) {
     });
     pm.setPublicServerFlag(true);
     ws.crypto = { enabled: false };
+    console.log({
+      event: 'easytier_handshake_accepted',
+      peerId: req.myPeerId,
+      serverSessionId: ws.serverSessionId,
+      networkName: clientNetworkName,
+    });
 
     const respBuffer = types.HandshakeRequest.encode(respPayload).finish();
     const respHeader = createHeader(MY_PEER_ID, req.myPeerId, PacketType.HandShake, respBuffer.length);
@@ -79,7 +83,7 @@ export function handleHandshake(ws, header, payload, types) {
     setTimeout(() => {
       try {
         if (ws.readyState === WS_OPEN) {
-          const pm = getPeerManager();
+          const pm = peerManager;
           pm.pushRouteUpdateTo(req.myPeerId, ws, types, { forceFull: true });
           pm.broadcastRouteUpdate(types, ws.groupKey, req.myPeerId, { forceFull: true });
         }
@@ -89,8 +93,8 @@ export function handleHandshake(ws, header, payload, types) {
     }, 50);
 
   } catch (e) {
-    console.error('Handshake error:', e);
-    ws.close();
+    console.error({ event: 'websocket_server_close', code: 1011, reason: 'handshake error', serverSessionId: ws.serverSessionId, error: e.stack || e.message });
+    ws.close(1011, 'handshake error');
   }
 }
 
@@ -99,9 +103,9 @@ export function handlePing(ws, header, payload) {
   ws.send(msg);
 }
 
-export function handleForwarding(sourceWs, header, fullMessage, types) {
+export function handleForwarding(sourceWs, header, fullMessage, types, peerManager) {
   const targetPeerId = header.toPeerId;
-  const pm = getPeerManager();
+  const pm = peerManager;
   const targetWs = pm.getPeerWs(targetPeerId, sourceWs && sourceWs.groupKey);
 
   if (targetWs && targetWs.readyState === WS_OPEN) {

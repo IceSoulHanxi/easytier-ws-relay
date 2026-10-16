@@ -9,6 +9,10 @@ EASYTIER_DISABLE_RELAY = "0"
 EASYTIER_COMPRESS_RPC = "1"
 LOCATION_HINT = "apac"
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [durable_objects]
 bindings = [
   { name = "RELAY_ROOM", class_name = "RelayRoom" }
